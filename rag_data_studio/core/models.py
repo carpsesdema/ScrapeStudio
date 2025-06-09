@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
 
+
 @dataclass
 class ScrapingRule:
     """
@@ -22,25 +23,33 @@ class ScrapingRule:
     # For a 'structured_list', this is implicitly True.
     # For other types, it means "get all elements matching the selector as a simple list of values".
     is_list: bool = False
-    data_type: str = "string" # E.g., 'string', 'number', 'list_of_strings', 'list_of_objects'
+    data_type: str = "string"  # E.g., 'string', 'number', 'list_of_strings', 'list_of_objects'
     required: bool = False
     # Crucial for nested data: a list of rules to apply within each element found by this rule's selector.
     sub_selectors: List['ScrapingRule'] = field(default_factory=list)
 
     # Helper method for converting to dict, handling nesting
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "id": self.id,
             "name": self.name,
             "selector": self.selector,
             "description": self.description,
             "extraction_type": self.extraction_type,
-            "attribute_name": self.attribute_name,
             "is_list": self.is_list,
             "data_type": self.data_type,
             "required": self.required,
-            "sub_selectors": [sub.to_dict() for sub in self.sub_selectors]
         }
+
+        # Only include attribute_name if it's not None
+        if self.attribute_name:
+            result["attribute_name"] = self.attribute_name
+
+        # Only include sub_selectors if this is structured_list OR if there are actual sub_selectors
+        if self.extraction_type == "structured_list" or self.sub_selectors:
+            result["sub_selectors"] = [sub.to_dict() for sub in self.sub_selectors]
+
+        return result
 
     # Helper method for creating from dict, handling nesting
     @classmethod
@@ -58,7 +67,7 @@ class ProjectConfig:
     id: str
     name: str
     description: str
-    domain: str # e.g., 'tennis_stats', 'ecommerce', 'news'
+    domain: str  # e.g., 'tennis_stats', 'ecommerce', 'news'
     target_websites: List[str]
     # NEW: Add a dedicated output directory per project!
     output_directory: Optional[str] = None
@@ -75,7 +84,7 @@ class ProjectConfig:
             "description": self.description,
             "domain": self.domain,
             "target_websites": self.target_websites,
-            "output_directory": self.output_directory, # Add to serialization
+            "output_directory": self.output_directory,  # Add to serialization
             "scraping_rules": [rule.to_dict() for rule in self.scraping_rules],
             "output_settings": self.output_settings,
             "rate_limiting": self.rate_limiting,

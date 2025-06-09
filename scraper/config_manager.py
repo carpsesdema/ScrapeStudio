@@ -19,8 +19,7 @@ class CustomFieldConfig(BaseModel):
             raise ValueError("`attribute_name` is required when `extract_type` is 'attribute'")
         if self.extract_type == 'structured_list' and not self.sub_selectors:
             raise ValueError("`sub_selectors` are required when `extract_type` is 'structured_list'")
-        if self.extract_type != 'structured_list' and self.sub_selectors:
-            raise ValueError("`sub_selectors` are only applicable when `extract_type` is 'structured_list'")
+        # Allow sub_selectors for any type - remove the restrictive validation
         return self
 
 class SelectorConfig(BaseModel):
