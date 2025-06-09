@@ -60,6 +60,8 @@ class ProjectConfig:
     description: str
     domain: str # e.g., 'tennis_stats', 'ecommerce', 'news'
     target_websites: List[str]
+    # NEW: Add a dedicated output directory per project!
+    output_directory: Optional[str] = None
     scraping_rules: List[ScrapingRule] = field(default_factory=list)
     output_settings: Dict[str, Any] = field(default_factory=lambda: {"format": "jsonl"})
     rate_limiting: Dict[str, Any] = field(default_factory=lambda: {"delay": 2.0, "respect_robots": True})
@@ -73,6 +75,7 @@ class ProjectConfig:
             "description": self.description,
             "domain": self.domain,
             "target_websites": self.target_websites,
+            "output_directory": self.output_directory, # Add to serialization
             "scraping_rules": [rule.to_dict() for rule in self.scraping_rules],
             "output_settings": self.output_settings,
             "rate_limiting": self.rate_limiting,

@@ -8,6 +8,7 @@ import yaml
 import tempfile
 import os
 from typing import Dict, List, Optional, Any
+from pathlib import Path
 
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
@@ -22,7 +23,7 @@ from .components.dialogs import TestResultsDialog
 from .integration.backend_bridge import BackendWorker
 
 # Import backend and storage components
-from scraper.searcher import run_pipeline
+from scraper.searcher import run_pipeline, run_pipeline_on_html
 from storage.database_inserter import DatabaseInserter
 from utils.logger import setup_logger
 
@@ -62,6 +63,9 @@ def load_dark_theme():
     QPushButton:disabled { background-color: #2a2a2a; color: #666; }
     QPushButton[class="success"] { background-color: #4CAF50; border-color: #45a049; }
     QPushButton[class="success"]:hover { background-color: #45a049; }
+    QCheckBox { spacing: 5px; }
+    QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #555; border-radius: 3px; }
+    QCheckBox::indicator:checked { background-color: #4CAF50; border-color: #66BB6A; }
     QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {
         background-color: #3a3a3a; border: 1px solid #555555;
         border-radius: 6px; padding: 6px; selection-background-color: #4CAF50;
@@ -92,14 +96,17 @@ class ScrapeRunner(QObject):
     finished = Signal(list, dict)  # Emits results and metrics
     error = Signal(str)
 
-    def __init__(self, config_path: str, project_name_for_db: str):
+    def __init__(self, config_path: str, html_content: Optional[str] = None):
         super().__init__()
         self.config_path = config_path
-        self.project_name_for_db = project_name_for_db
+        self.html_content = html_content
 
     def run(self):
         try:
-            results, metrics = run_pipeline(self.config_path)
+            if self.html_content:
+                results, metrics = run_pipeline_on_html(self.config_path, self.html_content)
+            else:
+                results, metrics = run_pipeline(self.config_path)
             self.finished.emit(results, metrics)
         except Exception as e:
             self.error.emit(str(e))
@@ -113,7 +120,7 @@ class RAGDataStudio(QMainWindow):
         self.current_project: Optional[ProjectConfig] = None
         self.backend_thread = None
         self.backend_worker = None
-        self.logger = setup_logger()  # Setup logger for the GUI
+        self.logger = setup_logger()
         self.init_ui()
         self.connect_signals()
 
@@ -127,13 +134,13 @@ class RAGDataStudio(QMainWindow):
         main_layout = QHBoxLayout(central_widget)
         main_splitter = QSplitter(Qt.Horizontal)
 
-        # Left Panel: Projects
+        # Left Panel
         self.project_manager = ProjectManager()
         self.project_manager.setMinimumWidth(250)
         self.project_manager.setMaximumWidth(400)
         main_splitter.addWidget(self.project_manager)
 
-        # Center Panel: Browser and Toolbar
+        # Center Panel
         center_widget = QWidget()
         center_layout = QVBoxLayout(center_widget)
         center_layout.setContentsMargins(0, 0, 0, 0)
@@ -152,7 +159,7 @@ class RAGDataStudio(QMainWindow):
         center_layout.addWidget(self.browser)
         main_splitter.addWidget(center_widget)
 
-        # Right Panel: Rule Creation and Management
+        # Right Panel
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -162,15 +169,29 @@ class RAGDataStudio(QMainWindow):
         right_splitter.addWidget(self.element_targeter)
         right_splitter.addWidget(self.rules_manager)
         right_splitter.setSizes([450, 350])
+
+        # Actions Group
         global_actions_group = QGroupBox("Project Actions")
-        global_actions_layout = QHBoxLayout(global_actions_group)
+        global_actions_layout = QVBoxLayout(global_actions_group)
+
+        self.scrape_from_browser_checkbox = QCheckBox("Scrape from current browser view")
+        self.scrape_from_browser_checkbox.setToolTip(
+            "If checked, the scraper will use the exact HTML currently visible in the browser.\n"
+            "Useful for pages that change content with JavaScript after loading."
+        )
+
+        buttons_layout = QHBoxLayout()
         self.test_all_btn = QPushButton("🧪 Test All Rules")
         self.export_config_btn = QPushButton("💾 Export to YAML")
         self.run_scrape_btn = QPushButton("🚀 Run Full Scrape")
         self.run_scrape_btn.setProperty("class", "success")
-        global_actions_layout.addWidget(self.test_all_btn)
-        global_actions_layout.addWidget(self.export_config_btn)
-        global_actions_layout.addWidget(self.run_scrape_btn)
+        buttons_layout.addWidget(self.test_all_btn)
+        buttons_layout.addWidget(self.export_config_btn)
+        buttons_layout.addWidget(self.run_scrape_btn)
+
+        global_actions_layout.addWidget(self.scrape_from_browser_checkbox)
+        global_actions_layout.addLayout(buttons_layout)
+
         right_layout.addWidget(right_splitter)
         right_layout.addWidget(global_actions_group)
         right_widget.setMinimumWidth(350)
@@ -185,29 +206,24 @@ class RAGDataStudio(QMainWindow):
         self.status_bar.showMessage("Ready. Create or select a project to begin.")
 
     def connect_signals(self):
-        # Project Management
         self.project_manager.project_selected.connect(self.load_project)
         self.project_manager.new_project_requested.connect(self.create_new_project)
-        # self.project_manager.project_updated.connect(self.save_current_project) # <<< THIS IS THE CULPRIT! REMOVED.
-
-        # Browser and Targeting
         self.url_input.returnPressed.connect(self.load_page)
         self.load_btn.clicked.connect(self.load_page)
         self.selector_btn.toggled.connect(self.toggle_selector_mode)
         self.browser.element_selected.connect(self.element_targeter.update_selection)
-
-        # Rule Creation and Management
         self.element_targeter.rule_created.connect(self.add_rule_to_project)
+        self.element_targeter.batch_rules_created.connect(self.add_batch_rules_to_project)
         self.rules_manager.delete_rule_requested.connect(self.delete_rule_from_project)
         self.rules_manager.add_sub_rule_requested.connect(self.set_targeter_for_sub_rule)
 
-        # Backend Actions
-        self.element_targeter.test_selector_requested.connect(self.test_single_selector)
+        # The "Test Selector" button was removed from the GUI, so we remove its connection.
+        # self.element_targeter.test_selector_requested.connect(self.test_single_selector) # <<< THIS IS THE BUG. REMOVING.
+
         self.test_all_btn.clicked.connect(self.test_all_rules)
         self.export_config_btn.clicked.connect(self.export_project_config)
         self.run_scrape_btn.clicked.connect(self.run_full_scrape)
 
-    # --- Project Methods ---
     def create_new_project(self):
         dialog = ProjectDialog(self)
         if dialog.exec() == QDialog.Accepted:
@@ -219,51 +235,47 @@ class RAGDataStudio(QMainWindow):
         self.current_project = project
         self.rules_manager.set_rules(project.scraping_rules)
         self.element_targeter.reset_mode()
-        if project.target_websites:
-            self.url_input.setText(project.target_websites[0])
+        if project.target_websites: self.url_input.setText(project.target_websites[0])
         self.status_bar.showMessage(f"Loaded project: {project.name}")
 
     def save_current_project(self):
-        """Saves the currently loaded project's state."""
         if self.current_project:
             self.current_project.updated_at = QDateTime.currentDateTime().toString(Qt.ISODate)
-            # The project manager handles the actual disk writing
             self.project_manager.add_or_update_project(self.current_project)
             self.status_bar.showMessage(f"Project '{self.current_project.name}' saved.", 3000)
 
-    # --- Rule Methods ---
     def add_rule_to_project(self, rule: ScrapingRule, parent_id: Optional[str]):
-        if not self.current_project:
-            QMessageBox.warning(self, "No Project", "Please select or create a project first.")
-            return
+        if not self.current_project: return
         if parent_id:
             parent_rule = self._find_rule_by_id(self.current_project.scraping_rules, parent_id)
-            if parent_rule:
-                parent_rule.sub_selectors.append(rule)
+            if parent_rule: parent_rule.sub_selectors.append(rule)
         else:
             self.current_project.scraping_rules.append(rule)
         self.rules_manager.set_rules(self.current_project.scraping_rules)
         self.save_current_project()
-        self.status_bar.showMessage(f"Added rule: {rule.name}", 3000)
+
+    def add_batch_rules_to_project(self, rules: List[ScrapingRule]):
+        if not self.current_project: return
+        self.current_project.scraping_rules.extend(rules)
+        self.rules_manager.set_rules(self.current_project.scraping_rules)
+        self.save_current_project()
+        self.status_bar.showMessage(f"Added {len(rules)} new rules from auto-detect.", 3000)
 
     def delete_rule_from_project(self, rule_id: str):
         if not self.current_project: return
-        reply = QMessageBox.question(self, "Delete Rule",
-                                     "Are you sure you want to delete this rule and all its sub-rules?",
+        reply = QMessageBox.question(self, "Delete Rule", "Delete this rule and all its sub-rules?",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.No:
-            return
+        if reply == QMessageBox.No: return
 
-        def find_and_remove(rules_list: List[ScrapingRule], r_id: str) -> bool:
-            for i, rule in enumerate(rules_list):
-                if rule.id == r_id: del rules_list[i]; return True
+        def find_and_remove(rules: List[ScrapingRule], r_id: str) -> bool:
+            for i, rule in enumerate(rules):
+                if rule.id == r_id: del rules[i]; return True
                 if find_and_remove(rule.sub_selectors, r_id): return True
             return False
 
         if find_and_remove(self.current_project.scraping_rules, rule_id):
             self.rules_manager.set_rules(self.current_project.scraping_rules)
             self.save_current_project()
-            self.status_bar.showMessage(f"Deleted rule.", 3000)
 
     def set_targeter_for_sub_rule(self, parent_rule_id: str):
         if not self.current_project: return
@@ -272,14 +284,13 @@ class RAGDataStudio(QMainWindow):
             self.element_targeter.set_mode_for_sub_field(parent_rule)
             self.status_bar.showMessage(f"Select an element to add a sub-field to '{parent_rule.name}'.")
 
-    def _find_rule_by_id(self, rules_list: List[ScrapingRule], rule_id: str) -> Optional[ScrapingRule]:
-        for rule in rules_list:
-            if rule.id == rule_id: return rule
-            found = self._find_rule_by_id(rule.sub_selectors, rule_id)
+    def _find_rule_by_id(self, rules: List[ScrapingRule], r_id: str) -> Optional[ScrapingRule]:
+        for rule in rules:
+            if rule.id == r_id: return rule
+            found = self._find_rule_by_id(rule.sub_selectors, r_id)
             if found: return found
         return None
 
-    # --- Browser and UI Methods ---
     def load_page(self):
         url = self.url_input.text().strip()
         if not url: return
@@ -290,14 +301,12 @@ class RAGDataStudio(QMainWindow):
     def toggle_selector_mode(self, checked):
         if checked:
             self.browser.enable_selector_mode()
-            self.selector_btn.setText("❌ Stop Targeting")
         else:
             self.browser.disable_selector_mode()
-            self.selector_btn.setText("🎯 Target Elements")
-            self.element_targeter.reset_mode()
+        self.selector_btn.setText("❌ Stop Targeting" if checked else "🎯 Target Elements")
+        if not checked: self.element_targeter.reset_mode()
         self.status_bar.showMessage(f"Targeting mode {'enabled' if checked else 'disabled'}.")
 
-    # --- Backend Methods ---
     def _execute_backend_task(self, task_name: str, **kwargs):
         self.backend_thread = QThread()
         if task_name == 'test_selectors':
@@ -307,7 +316,7 @@ class RAGDataStudio(QMainWindow):
             worker.error_occurred.connect(self.on_backend_error)
             self.backend_thread.started.connect(lambda: worker.test_selectors_on_url(kwargs['url'], kwargs['rules']))
         elif task_name == 'run_scrape':
-            worker = ScrapeRunner(kwargs['config_path'], kwargs['project_name'])
+            worker = ScrapeRunner(kwargs['config_path'], kwargs.get('html_content'))
             worker.moveToThread(self.backend_thread)
             worker.finished.connect(self.on_scrape_finished)
             worker.error.connect(self.on_backend_error)
@@ -316,121 +325,88 @@ class RAGDataStudio(QMainWindow):
         self.backend_thread.finished.connect(self.backend_thread.deleteLater)
         self.backend_thread.start()
 
-    def test_single_selector(self, rule_dict: Dict[str, Any]):
-        if not self.browser.url().isValid():
-            QMessageBox.warning(self, "No URL", "Please load a valid page in the browser first.")
-            return
-        url = self.browser.url().toString()
-        self.status_bar.showMessage(f"Testing selector '{rule_dict['name']}' on {url}...")
-        self._execute_backend_task('test_selectors', url=url, rules=[rule_dict])
-
     def test_all_rules(self):
-        if not self.current_project or not self.current_project.scraping_rules: return
-        if not self.browser.url().isValid():
-            QMessageBox.warning(self, "No URL", "Please load a valid page in the browser first.")
-            return
+        if not self.current_project or not self.browser.url().isValid(): return
         url = self.browser.url().toString()
         rules = [r.to_dict() for r in self.current_project.scraping_rules]
         self.status_bar.showMessage(f"Testing all {len(rules)} rules on {url}...")
         self._execute_backend_task('test_selectors', url=url, rules=rules)
 
     def on_test_results_ready(self, results: dict):
-        self.status_bar.showMessage("Selector test complete.", 4000)
+        if self.backend_thread: self.backend_thread.quit()
         dialog = TestResultsDialog(results, self, test_url=self.browser.url().toString())
         dialog.exec()
-        if self.backend_thread: self.backend_thread.quit()
 
     def on_backend_error(self, error_message: str):
-        self.status_bar.showMessage(f"Error: {error_message}", 5000)
-        QMessageBox.critical(self, "Backend Error", error_message)
         if self.backend_thread: self.backend_thread.quit()
+        QMessageBox.critical(self, "Backend Error", error_message)
 
-    # --- Scrape & Save ---
     def run_full_scrape(self):
-        if not self.current_project:
-            QMessageBox.warning(self, "No Project", "Please select a project to run.")
-            return
-
+        if not self.current_project: return
         config_path = self.export_project_config(save_to_temp=True)
-        if not config_path:
-            return
-
+        if not config_path: return
         self.status_bar.showMessage("🚀 Starting full scraping pipeline...")
         self.run_scrape_btn.setEnabled(False)
-        self._execute_backend_task('run_scrape', config_path=config_path, project_name=self.current_project.name)
+
+        if self.scrape_from_browser_checkbox.isChecked():
+            self.browser.page().toHtml(lambda html: self._execute_backend_task(
+                'run_scrape', config_path=config_path, html_content=html
+            ))
+        else:
+            self._execute_backend_task('run_scrape', config_path=config_path)
 
     def on_scrape_finished(self, results: list, metrics: dict):
-        self.status_bar.showMessage(f"✅ Scrape complete! Extracted {metrics.get('items_extracted', 0)} items.", 5000)
         self.run_scrape_btn.setEnabled(True)
+        if self.backend_thread: self.backend_thread.quit()
 
-        # Determine which source was used to map to the correct db inserter function
-        source_name = ""
-        if self.current_project and self.current_project.scraping_rules:
-            # A simple assumption: the first source name is representative
-            source_name = self.current_project.name.lower().replace(' ', '_')
+        if not self.current_project: return
+        base_output_dir = self.current_project.output_directory or "./data_exports"
+        db_path = Path(base_output_dir) / f"{self.current_project.domain}_intelligence.db"
 
-        # Save to database
         try:
-            db_path = f"./data_exports/{self.current_project.domain}_intelligence.db"
-            inserter = DatabaseInserter(db_path)
-
-            # Here you could build a router based on source_name if you have many
-            # For now, we assume a generic stats inserter
+            inserter = DatabaseInserter(str(db_path))
+            source_name = self.current_project.name.lower().replace(' ', '_')
             inserter.insert_player_stats(results, source_name)
             inserter.close()
             QMessageBox.information(self, "Scrape Complete",
-                                    f"Scraping finished.\n{metrics.get('items_extracted', 0)} items processed and saved to database:\n{db_path}")
+                                    f"Scraping finished.\n{metrics.get('items_extracted', 0)} items processed.\nResults saved to database:\n{db_path}")
         except Exception as e:
-            self.logger.error(f"Failed to save results to database: {e}", exc_info=True)
             QMessageBox.critical(self, "Database Error", f"Could not save results to the database: {e}")
 
-        if self.backend_thread: self.backend_thread.quit()
-
-    # --- Export ---
     def export_project_config(self, save_to_temp=False) -> Optional[str]:
-        if not self.current_project:
-            QMessageBox.warning(self, "No Project", "Please select a project to export.")
-            return None
-
+        if not self.current_project: return None
         config_data = self._create_backend_config_from_project(self.current_project)
 
         if save_to_temp:
-            # Use a temporary file for running scrapes
             fd, path = tempfile.mkstemp(suffix=".yaml", text=True)
             with os.fdopen(fd, 'w') as f:
-                yaml.dump(config_data, f, default_flow_style=False, sort_keys=False, indent=2)
+                yaml.dump(config_data, f, indent=2)
             return path
         else:
-            # Use a file dialog for user-initiated saves
-            filename, _ = QFileDialog.getSaveFileName(self, "Export Scraper Config",
-                                                      f"configs/{self.current_project.name.lower().replace(' ', '_')}_config.yaml",
-                                                      "YAML files (*.yaml *.yml)")
+            initial_dir = self.current_project.output_directory or "configs"
+            Path(initial_dir).mkdir(parents=True, exist_ok=True)
+            filename, _ = QFileDialog.getSaveFileName(self, "Export Config",
+                                                      f"{initial_dir}/{self.current_project.name.lower().replace(' ', '_')}.yaml",
+                                                      "YAML (*.yaml *.yml)")
             if not filename: return None
-            try:
-                with open(filename, 'w') as f:
-                    yaml.dump(config_data, f, default_flow_style=False, sort_keys=False, indent=2)
-                QMessageBox.information(self, "Export Complete", f"Configuration saved to:\n{filename}")
-                return filename
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Could not save config file: {e}")
-                return None
+            with open(filename, 'w') as f:
+                yaml.dump(config_data, f, indent=2)
+            QMessageBox.information(self, "Export Complete", f"Config saved to:\n{filename}")
+            return filename
 
     def _create_backend_config_from_project(self, project: ProjectConfig) -> Dict[str, Any]:
         def rule_to_dict(rule: ScrapingRule):
-            d = {"name": rule.name, "selector": rule.selector, "extract_type": rule.extraction_type,
-                 "attribute_name": rule.attribute_name, "is_list": rule.is_list, "required": rule.required}
-            if rule.sub_selectors: d["sub_selectors"] = [rule_to_dict(sub) for sub in rule.sub_selectors]
+            d = {k: v for k, v in rule.to_dict().items() if v is not None}
+            if "sub_selectors" in d and not d["sub_selectors"]: del d["sub_selectors"]
             return d
 
         source_name = project.name.lower().replace(' ', '_')
-        # Use rate_limiting and output_settings from project model
-        crawl_config = project.rate_limiting
-        export_config = project.output_settings
-        export_config['output_path'] = f"./data_exports/{project.domain}/{source_name}.jsonl"
+        base_output_dir = project.output_directory or f"./data_exports/{project.domain}"
+        output_path = Path(base_output_dir) / f"{source_name}.jsonl"
 
         return {"domain_info": {"name": project.name, "description": project.description, "domain": project.domain},
                 "sources": [{"name": source_name, "seeds": project.target_websites, "source_type": project.domain,
                              "selectors": {"custom_fields": [rule_to_dict(r) for r in project.scraping_rules]},
-                             "crawl": crawl_config,
-                             "export": export_config
-                             }]}
+                             "crawl": project.rate_limiting,
+                             "export": {"format": project.output_settings.get("format", "jsonl"),
+                                        "output_path": str(output_path)}}]}

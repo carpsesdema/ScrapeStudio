@@ -1,0 +1,93 @@
+# .gitignore
+
+# Python #
+###########
+# Byte-compiled / optimized / C extensions
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+# Usually dist/ and build/ would be enough, but mentioning it for clarity
+*.spec
+
+
+# Virtual Environments #
+######################
+.env
+.venv
+venv/
+env/
+ENV/
+venv.bak
+
+
+# IDE / Editor specific files #
+#############################
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+
+# Application Generated Files #
+###############################
+# Logs
+logs/
+*.log
+*.log.*
+
+# Data outputs and database files from the scraper
+data_exports/
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files created by the application
+temp/
+
+# Configuration files that are user-specific or contain secrets.
+# We keep the templates in `configs/` but might ignore local overrides.
+# For now, we assume all configs are safe to commit. Add specific
+# files like `local_config.yaml` here if you create them.
+
+
+# OS generated files #
+######################
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+
+# Temporary and Backup Files #
+##############################
+*.bak
+*.swp
+*~
+/configs/

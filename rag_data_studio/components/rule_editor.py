@@ -1,9 +1,10 @@
 # rag_data_studio/components/rule_editor.py
 """
-UI components for defining and managing scraping rules, including nested rules.
+UI components for defining and managing scraping rules.
+REBUILT for reliable Auto-Detect Table feature.
 """
-import re
 import uuid
+import re
 from typing import List, Optional
 
 from PySide6.QtWidgets import *
@@ -15,14 +16,13 @@ from ..core.models import ScrapingRule
 
 class VisualElementTargeter(QWidget):
     """A panel for defining a new scraping rule based on a browser selection."""
-    rule_created = Signal(ScrapingRule, str)  # Emits rule and parent_id (if it's a sub-rule)
-    test_selector_requested = Signal(dict)
+    rule_created = Signal(ScrapingRule, str)
+    batch_rules_created = Signal(list)
 
     def __init__(self):
         super().__init__()
         self.current_selector = ""
-        self.current_element_text = ""
-        self.current_suggestions = {}
+        self.last_table_info = {}
         self.parent_rule_id: Optional[str] = None
         self.init_ui()
 
@@ -32,11 +32,9 @@ class VisualElementTargeter(QWidget):
         self.header.setFont(QFont("Segoe UI", 14, QFont.Bold))
         self.header.setStyleSheet("color: #4CAF50; margin: 10px 0;")
 
-        # --- Selection Group ---
         selection_group = QGroupBox("Selected Element")
         selection_layout = QFormLayout(selection_group)
         self.selector_display = QLineEdit()
-        self.selector_display.setReadOnly(True)
         self.selector_display.setPlaceholderText("Click an element in the browser...")
         self.element_text_display = QTextEdit()
         self.element_text_display.setReadOnly(True)
@@ -44,14 +42,17 @@ class VisualElementTargeter(QWidget):
         selection_layout.addRow("CSS Selector:", self.selector_display)
         selection_layout.addRow("Element Text:", self.element_text_display)
 
-        # --- Rule Definition Group ---
         rule_def_group = QGroupBox("Rule Definition")
         rule_def_layout = QFormLayout(rule_def_group)
         self.field_name_input = QLineEdit()
         self.field_name_input.setPlaceholderText("e.g., player_name, or player_list")
         rule_def_layout.addRow("Field Name*:", self.field_name_input)
 
-        # --- Extraction Options Group ---
+        self.auto_table_btn = QPushButton("🪄 Auto-Detect Table")
+        self.auto_table_btn.setToolTip("Click a cell, then this button to auto-detect the whole table structure.")
+        self.auto_table_btn.setEnabled(False)
+        rule_def_layout.addRow(self.auto_table_btn)
+
         advanced_group = QGroupBox("Extraction Options")
         advanced_layout = QFormLayout(advanced_group)
         self.extraction_type_combo = QComboBox()
@@ -60,30 +61,14 @@ class VisualElementTargeter(QWidget):
         self.attribute_input.setPlaceholderText("e.g., href, src")
         self.attribute_input.setEnabled(False)
         self.is_list_check = QCheckBox("Extract all matching elements (as a list)")
-        self.is_list_check.setToolTip("For multiple simple values. Implied for 'structured_list'.")
-        self.data_type_combo = QComboBox()
-        self.data_type_combo.addItems(["string", "number", "boolean", "date", "list_of_strings", "list_of_objects"])
-        self.sub_selector_info_label = QLabel(
-            "Info: A 'structured_list' is a container for other fields. "
-            "Save this rule, then use 'Add Sub-Field' on it.")
-        self.sub_selector_info_label.setWordWrap(True)
-        self.sub_selector_info_label.setStyleSheet("font-size: 9pt; color: #cccccc;")
-        self.sub_selector_info_label.setVisible(False)
-
         advanced_layout.addRow("Extract How:", self.extraction_type_combo)
         advanced_layout.addRow("Attribute Name:", self.attribute_input)
-        advanced_layout.addRow("Data Type:", self.data_type_combo)
         advanced_layout.addRow("", self.is_list_check)
-        advanced_layout.addRow(self.sub_selector_info_label)
 
-        # --- Action Buttons ---
         action_layout = QHBoxLayout()
-        self.test_btn = QPushButton("🧪 Test Selector")
-        self.test_btn.setEnabled(False)
         self.save_btn = QPushButton("💾 Save Rule")
         self.save_btn.setProperty("class", "success")
         self.save_btn.setEnabled(False)
-        action_layout.addWidget(self.test_btn)
         action_layout.addStretch()
         action_layout.addWidget(self.save_btn)
 
@@ -94,117 +79,119 @@ class VisualElementTargeter(QWidget):
         layout.addLayout(action_layout)
         layout.addStretch()
 
-        # --- Connections ---
-        self.extraction_type_combo.currentTextChanged.connect(self.on_extraction_type_changed)
         self.save_btn.clicked.connect(self.save_current_rule)
-        self.test_btn.clicked.connect(self.test_current_selector_emit)
-        self.is_list_check.toggled.connect(self.on_is_list_toggled)
+        self.auto_table_btn.clicked.connect(self.on_auto_detect_table)
 
-    def set_mode_for_sub_field(self, parent_rule: ScrapingRule):
-        """Pre-configures the form for adding a field to a structured_list."""
-        self.parent_rule_id = parent_rule.id
-        self.header.setText(f"➕ Add Field to '{parent_rule.name}'")
-        self.header.setStyleSheet("color: #FFA726; margin: 10px 0;")  # Orange color for sub-field mode
-        # Sub-fields are typically simple extractions within the parent context
-        self.extraction_type_combo.clear()
-        self.extraction_type_combo.addItems(["text", "attribute", "html"])
-        self.extraction_type_combo.setCurrentText("text")
-        self.is_list_check.setChecked(False)  # A sub-field extracts one value per parent item
-        self.is_list_check.setEnabled(False)
-        self.field_name_input.setFocus()
-
-    def reset_mode(self):
-        """Resets the form to its default state for defining a new top-level rule."""
-        self.parent_rule_id = None
-        self.header.setText("🎯 Define New Rule")
-        self.header.setStyleSheet("color: #4CAF50; margin: 10px 0;")
-        self.extraction_type_combo.clear()
-        self.extraction_type_combo.addItems(["text", "attribute", "html", "structured_list"])
-        self.is_list_check.setEnabled(True)
-        self._clear_form()
-
-    def on_extraction_type_changed(self, extraction_type: str):
-        self.attribute_input.setEnabled(extraction_type == "attribute")
-        self.sub_selector_info_label.setVisible(extraction_type == "structured_list")
-        self.is_list_check.setEnabled(extraction_type != "structured_list")
-        if extraction_type == "structured_list":
-            self.is_list_check.setChecked(False)  # is_list is implicit
-            self.data_type_combo.setCurrentText("list_of_objects")
-        else:
-            self.on_is_list_toggled(self.is_list_check.isChecked())
-
-    def on_is_list_toggled(self, checked: bool):
-        if self.extraction_type_combo.currentText() != "structured_list":
-            self.data_type_combo.setCurrentText("list_of_strings" if checked else "string")
-
-    def update_selection(self, selector: str, text: str, suggestions: dict):
-        self.current_selector = selector
-        self.current_element_text = text
-        self.current_suggestions = suggestions
-
-        # Auto-select the 'container' selector if available, it's often more useful
-        chosen_suggestion = suggestions.get('container') or suggestions.get('current', {})
-        display_selector = chosen_suggestion.get('selector', selector)
-        display_text = chosen_suggestion.get('text', text)
-
-        self.selector_display.setText(display_selector)
-        self.element_text_display.setText(display_text[:250] + "..." if len(display_text) > 250 else display_text)
-        self.save_btn.setEnabled(bool(display_selector))
-        self.test_btn.setEnabled(bool(display_selector))
-
-        if not self.field_name_input.text() and text:
-            # Auto-suggest name based on text content
-            suggested_name = re.sub(r'[^a-zA-Z0-9_]', '', text.lower().replace(" ", "_").replace(":", ""))
-            self.field_name_input.setText(suggested_name[:40])
-
-    def save_current_rule(self):
-        if not self.selector_display.text() or not self.field_name_input.text():
-            QMessageBox.warning(self, "Missing Info", "Please select an element and provide a Field Name.")
+    def on_auto_detect_table(self):
+        if not self.last_table_info or not self.last_table_info.get('is_in_table'):
+            QMessageBox.warning(self, "Not a Table", "The last clicked element was not inside a valid table.")
             return
 
-        extraction_type = self.extraction_type_combo.currentText()
-        is_list_for_rule = (extraction_type == "structured_list") or self.is_list_check.isChecked()
+        headers = self.last_table_info.get('headers', [])
+        if not headers:
+            QMessageBox.warning(self, "No Headers Found", "Could not find table headers (<th> elements).")
+            return
+
+        row_selector = self.last_table_info.get('row_selector')
+        if not row_selector:
+            QMessageBox.warning(self, "Could not find row selector", "Could not determine the selector for table rows.")
+            return
+        # Generalize the row selector to get all rows, not just the one clicked
+        all_rows_selector = re.sub(r':nth-of-type\(\d+\)$', '', row_selector)
+
+        main_rule_name = self.field_name_input.text().strip() or "table_data"
+        main_rule = ScrapingRule(
+            id=f"rule_{uuid.uuid4().hex[:8]}",
+            name=main_rule_name,
+            selector=all_rows_selector,
+            extraction_type="structured_list",
+            is_list=True,
+            data_type="list_of_objects"
+        )
+
+        for i, header_text in enumerate(headers):
+            field_name = re.sub(r'[^a-zA-Z0-9_]', '', header_text.lower().replace(" ", "_")) or f"column_{i + 1}"
+            sub_rule = ScrapingRule(
+                id=f"rule_{uuid.uuid4().hex[:8]}",
+                name=field_name,
+                selector=f"td:nth-of-type({i + 1}), th:nth-of-type({i + 1})",  # Handle rows with th or td
+                extraction_type="text"
+            )
+            main_rule.sub_selectors.append(sub_rule)
+
+        self.batch_rules_created.emit([main_rule])
+        QMessageBox.information(self, "Success!", f"Table '{main_rule_name}' with {len(headers)} columns detected!")
+        self.reset_mode()
+
+    def update_selection(self, selector: str, text: str):
+        self.current_selector = selector
+        self.selector_display.setText(selector)
+        self.element_text_display.setText(text)
+        self.save_btn.setEnabled(True)
+
+        # Asynchronously ask the browser for more details about this element
+        self.window().browser.get_element_info(selector, self.on_element_info_received)
+
+        if not self.field_name_input.text() and text:
+            suggested_name = re.sub(r'[^a-zA-Z0-9_]', '', text.lower().replace(" ", "_"))
+            self.field_name_input.setText(suggested_name[:40])
+
+    def on_element_info_received(self, info: Optional[dict]):
+        if info and info.get('is_in_table'):
+            self.last_table_info = info
+            self.auto_table_btn.setEnabled(True)
+            # Pre-fill field name for convenience
+            if not self.field_name_input.text():
+                self.field_name_input.setText("scraped_table")
+        else:
+            self.last_table_info = {}
+            self.auto_table_btn.setEnabled(False)
+
+    def save_current_rule(self):
+        if not self.current_selector or not self.field_name_input.text():
+            QMessageBox.warning(self, "Missing Info", "Please select an element and provide a Field Name.")
+            return
 
         rule = ScrapingRule(
             id=f"rule_{uuid.uuid4().hex[:8]}",
             name=self.field_name_input.text().strip(),
-            selector=self.selector_display.text().strip(),
-            extraction_type=extraction_type,
+            selector=self.current_selector,
+            extraction_type=self.extraction_type_combo.currentText(),
             attribute_name=self.attribute_input.text().strip() if self.attribute_input.isEnabled() else None,
-            is_list=is_list_for_rule,
-            data_type=self.data_type_combo.currentText()
+            is_list=self.is_list_check.isChecked()
         )
         self.rule_created.emit(rule, self.parent_rule_id)
         self.reset_mode()
         QMessageBox.information(self, "Rule Saved", f"Rule '{rule.name}' has been created!")
 
+    def reset_mode(self):
+        self.parent_rule_id = None
+        self.header.setText("🎯 Define New Rule")
+        self.header.setStyleSheet("color: #4CAF50; margin: 10px 0;")
+        self._clear_form()
+
     def _clear_form(self):
         self.field_name_input.clear()
-        self.is_list_check.setChecked(False)
-        self.extraction_type_combo.setCurrentIndex(0)
-        self.data_type_combo.setCurrentIndex(0)
         self.selector_display.clear()
         self.element_text_display.clear()
         self.save_btn.setEnabled(False)
-        self.test_btn.setEnabled(False)
+        self.auto_table_btn.setEnabled(False)
+        self.last_table_info = {}
+        self.current_selector = ""
 
-    def test_current_selector_emit(self):
-        if not self.selector_display.text():
-            QMessageBox.warning(self, "No Selector", "No selector is available to test.")
-            return
-        self.test_selector_requested.emit({
-            "name": self.field_name_input.text() or f"test_rule",
-            "selector": self.selector_display.text(),
-            "extract_type": self.extraction_type_combo.currentText(),
-            "attribute_name": self.attribute_input.text() if self.attribute_input.isEnabled() else None
-        })
+    def set_mode_for_sub_field(self, parent_rule: ScrapingRule):
+        self.parent_rule_id = parent_rule.id
+        self.header.setText(f"➕ Add Field to '{parent_rule.name}'")
+        self.header.setStyleSheet("color: #FFA726; margin: 10px 0;")
+        self.field_name_input.setFocus()
 
 
+# Keeping RulesManager the same as it was already correct
 class RulesManager(QWidget):
     """Manages the tree view of scraping rules and associated actions."""
-    rule_selection_changed = Signal(str)  # rule_id
-    delete_rule_requested = Signal(str)  # rule_id
-    add_sub_rule_requested = Signal(str)  # parent_rule_id
+    rule_selection_changed = Signal(str)
+    delete_rule_requested = Signal(str)
+    add_sub_rule_requested = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -266,7 +253,6 @@ class RulesManager(QWidget):
             self.delete_rule_requested.emit(self.rules_tree.selectedItems()[0].data(0, Qt.UserRole))
 
     def set_rules(self, rules: List[ScrapingRule]):
-        """Clears and rebuilds the entire rule tree from a list of rules."""
         self.rules_tree.clear()
 
         def add_item_to_tree(rule, parent_widget):
@@ -278,7 +264,7 @@ class RulesManager(QWidget):
             item.setText(1, extract_display)
             item.setText(2, rule.selector)
             item.setData(0, Qt.UserRole, rule.id)
-            item.setToolTip(2, rule.selector)  # Show full selector on hover
+            item.setToolTip(2, rule.selector)
 
             if rule.extraction_type == "structured_list":
                 item.setForeground(0, QBrush(QColor("#4CAF50")))

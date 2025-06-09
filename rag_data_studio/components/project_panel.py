@@ -119,7 +119,6 @@ class ProjectManager(QWidget):
 
     def get_project_path(self) -> Path:
         """Gets the path to the projects config file."""
-        # Store in user's home directory for better cross-platform compatibility
         data_dir = Path.home() / ".rag_data_studio"
         data_dir.mkdir(parents=True, exist_ok=True)
         return data_dir / "projects.json"
@@ -150,7 +149,6 @@ class ProjectManager(QWidget):
         except (json.JSONDecodeError, TypeError) as e:
             print(f"❌ Error loading or parsing projects file {project_file}: {e}. Creating a backup.")
             self.projects = {}
-            # Backup corrupted file
             try:
                 import shutil
                 shutil.copy(project_file, project_file.with_suffix('.json.bak'))
@@ -181,7 +179,7 @@ class ProjectDialog(QDialog):
         self.project_to_edit = project_to_edit
         self.setWindowTitle("Edit Project" if project_to_edit else "Create New Project")
         self.setModal(True)
-        self.resize(500, 400)
+        self.resize(550, 450)
         self.init_ui()
         if project_to_edit:
             self.populate_for_edit(project_to_edit)
@@ -198,9 +196,16 @@ class ProjectDialog(QDialog):
 
         self.domain_combo = QComboBox()
         self.domain_combo.setEditable(True)
-        self.domain_combo.addItems([
-            "tennis_stats", "sports_general", "finance", "news", "ecommerce", "research", "custom"
-        ])
+        self.domain_combo.addItems(["tennis_stats", "sports_general", "finance", "news", "ecommerce", "research", "custom"])
+
+        # --- NEW UI ELEMENTS FOR OUTPUT DIRECTORY ---
+        output_layout = QHBoxLayout()
+        self.output_dir_input = QLineEdit()
+        self.output_dir_input.setPlaceholderText("Default: (Project Folder)/data_exports/")
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self.browse_for_directory)
+        output_layout.addWidget(self.output_dir_input)
+        output_layout.addWidget(browse_btn)
 
         self.websites_input = QTextEdit()
         self.websites_input.setPlaceholderText("Enter main target URLs, one per line (e.g., https://www.atptour.com/en/rankings/singles)")
@@ -209,6 +214,7 @@ class ProjectDialog(QDialog):
         form_layout.addRow("Project Name*:", self.name_input)
         form_layout.addRow("Description:", self.description_input)
         form_layout.addRow("Primary Domain*:", self.domain_combo)
+        form_layout.addRow("Output Directory:", output_layout) # Add the new layout here
         form_layout.addRow("Target Websites:", self.websites_input)
 
         button_layout = QHBoxLayout()
@@ -226,11 +232,23 @@ class ProjectDialog(QDialog):
         self.ok_btn.clicked.connect(self.on_ok_clicked)
         self.cancel_btn.clicked.connect(self.reject)
 
+    def browse_for_directory(self):
+        """Opens a dialog to select an output directory."""
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Directory",
+            self.output_dir_input.text() or str(Path.home()) # Start at home dir
+        )
+        if directory:
+            self.output_dir_input.setText(directory)
+
     def populate_for_edit(self, project: ProjectConfig):
         self.name_input.setText(project.name)
         self.description_input.setPlainText(project.description)
         self.domain_combo.setCurrentText(project.domain)
         self.websites_input.setPlainText("\n".join(project.target_websites))
+        if project.output_directory:
+            self.output_dir_input.setText(project.output_directory)
 
     def on_ok_clicked(self):
         if not self.name_input.text().strip() or not self.domain_combo.currentText().strip():
@@ -240,12 +258,14 @@ class ProjectDialog(QDialog):
 
     def get_project_config(self) -> ProjectConfig:
         websites = [line.strip() for line in self.websites_input.toPlainText().split('\n') if line.strip()]
+        output_dir = self.output_dir_input.text().strip() or None # Use None if empty
 
         if self.project_to_edit:
             self.project_to_edit.name = self.name_input.text().strip()
             self.project_to_edit.description = self.description_input.toPlainText().strip()
             self.project_to_edit.domain = self.domain_combo.currentText()
             self.project_to_edit.target_websites = websites
+            self.project_to_edit.output_directory = output_dir
             self.project_to_edit.updated_at = datetime.now().isoformat()
             return self.project_to_edit
         else:
@@ -255,4 +275,5 @@ class ProjectDialog(QDialog):
                 description=self.description_input.toPlainText().strip(),
                 domain=self.domain_combo.currentText(),
                 target_websites=websites,
+                output_directory=output_dir,
             )
