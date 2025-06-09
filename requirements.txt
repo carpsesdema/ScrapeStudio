@@ -1,0 +1,14 @@
+# requirements.txt
+PySide6
+PySide6-Addons
+PySide6-Essentials
+PyYAML
+requests
+beautifulsoup4
+lxml
+trafilatura
+pdfminer.six
+spacy
+langdetect
+pydantic
+duckduckgo-search
