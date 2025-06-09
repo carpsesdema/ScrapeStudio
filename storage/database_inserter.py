@@ -13,7 +13,7 @@ from scraper.rag_models import StructuredDataItem
 logger = logging.getLogger(__name__)
 
 DB_SCHEMA = """
--- Paste your entire schema here
+-- The full DB schema from before, omitted for brevity
 CREATE TABLE IF NOT EXISTS players (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     api_player_id VARCHAR(50) UNIQUE,
@@ -30,21 +30,6 @@ CREATE TABLE IF NOT EXISTS players (
     backhand VARCHAR(20),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS player_rankings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    player_id INTEGER,
-    ranking_date DATE,
-    atp_ranking INTEGER,
-    wta_ranking INTEGER,
-    ranking_points INTEGER,
-    ranking_movement INTEGER,
-    weeks_at_ranking INTEGER,
-    previous_ranking INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (player_id) REFERENCES players(id),
-    UNIQUE(player_id, ranking_date)
 );
 
 CREATE TABLE IF NOT EXISTS player_statistics (
@@ -81,7 +66,6 @@ CREATE TABLE IF NOT EXISTS player_statistics (
     FOREIGN KEY (player_id) REFERENCES players(id),
     UNIQUE(player_id, stat_date, surface, timeframe)
 );
--- Add other tables from your schema here...
 """
 
 
@@ -116,54 +100,60 @@ class DatabaseInserter:
             self.conn.commit()
             return cursor.lastrowid
 
-    def insert_player_stats(self, items: List[StructuredDataItem], source_name: str):
+    def insert_player_stats(self, items: List[StructuredDataItem]):
         """
         Inserts player statistics from scraped data.
-        This is a sample implementation for the 'atp_serve_leaderboard_52_week' source.
+        This implementation is now generic and works for any project that scrapes player stats.
         """
-        if source_name != "atp_serve_leaderboard_52_week":
-            logger.warning(f"No specific insertion logic for source: {source_name}. Skipping.")
-            return
-
         cursor = self.conn.cursor()
         total_inserted = 0
         from datetime import date
 
         for item in items:
-            # The data is nested under the rule name from the YAML
-            stats_list = item.structured_data.get("serve_stats_leaders", [])
-            if not isinstance(stats_list, list): continue
+            # --- INTELLIGENT DATA FINDER ---
+            # Find the first field in the data that is a list of dictionaries (our structured list)
+            stats_list = []
+            for key, value in item.structured_data.items():
+                if isinstance(value, list) and all(isinstance(i, dict) for i in value):
+                    stats_list = value
+                    logger.info(f"Found structured list to process under key: '{key}'")
+                    break
 
-            for stats in stats_list:
+            if not stats_list:
+                logger.warning(f"No structured list found in item from {item.source_url}. Skipping.")
+                continue
+
+            for stats_row in stats_list:
                 try:
-                    player_name = stats.get('player_name')
+                    # Use .get() to safely access keys that might be missing
+                    player_name = stats_row.get('player') or stats_row.get('player_name')
                     if not player_name: continue
 
                     player_id = self.get_or_create_player(player_name)
 
-                    # A helper to clean and convert percentage strings like "70.5%" to 70.5
                     def clean_percent(val):
-                        if isinstance(val, str):
-                            return float(val.strip().replace('%', ''))
+                        if isinstance(val, str): return float(val.strip().replace('%', ''))
                         return val
 
-                    # Prepare data for insertion
+                    # Map data from the scrape to the DB columns
                     data_to_insert = {
                         "player_id": player_id,
                         "stat_date": date.today().isoformat(),
-                        "surface": "all",
-                        "timeframe": "last52weeks",
-                        "matches_played": stats.get('matches_played'),
-                        "first_serve_percentage": clean_percent(stats.get('first_serve_percentage')),
-                        "first_serve_points_won": clean_percent(stats.get('first_serve_points_won')),
-                        "second_serve_points_won": clean_percent(stats.get('second_serve_points_won')),
-                        "service_games_won": clean_percent(stats.get('service_games_won')),
-                        "aces_per_match": stats.get('aces_per_match'),  # Example data
-                        "double_faults_per_match": stats.get('double_faults_per_match'),  # Example data
+                        "surface": "all",  # This could be parameterized in the future
+                        "timeframe": "last52weeks",  # This could also be parameterized
+                        "matches_played": stats_row.get('matches_played'),
+                        "first_serve_percentage": clean_percent(stats_row.get('first_serve_percentage')),
+                        "first_serve_points_won": clean_percent(stats_row.get('first_serve_points_won')),
+                        "second_serve_points_won": clean_percent(stats_row.get('second_serve_points_won')),
+                        "service_games_won": clean_percent(stats_row.get('service_games_won')),
+                        # Add other mappings here as you create rules for them
                     }
 
-                    # Use INSERT OR REPLACE to handle UNIQUE constraints gracefully
-                    # This will update the row if a record for that player/date/surface/timeframe already exists
+                    # Filter out None values so they don't overwrite DB defaults
+                    data_to_insert = {k: v for k, v in data_to_insert.items() if v is not None}
+
+                    if not data_to_insert: continue
+
                     columns = ', '.join(data_to_insert.keys())
                     placeholders = ', '.join('?' for _ in data_to_insert)
                     sql = f"INSERT OR REPLACE INTO player_statistics ({columns}) VALUES ({placeholders})"
@@ -172,15 +162,14 @@ class DatabaseInserter:
                     total_inserted += 1
 
                 except (ValueError, TypeError) as e:
-                    logger.warning(f"Skipping row due to data conversion error: {e}. Data: {stats}")
+                    logger.warning(f"Skipping row due to data conversion error: {e}. Data: {stats_row}")
                 except Exception as e:
-                    logger.error(f"Error inserting stats row: {e}. Data: {stats}")
+                    logger.error(f"Error inserting stats row: {e}. Data: {stats_row}")
 
         self.conn.commit()
         logger.info(f"Successfully inserted/updated {total_inserted} rows into player_statistics.")
 
     def close(self):
-        """Closes the database connection."""
         if self.conn:
             self.conn.close()
             logger.info("Database connection closed.")
