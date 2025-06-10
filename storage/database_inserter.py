@@ -62,6 +62,23 @@ CREATE TABLE IF NOT EXISTS player_statistics (
     tiebreaks_played INTEGER DEFAULT 0,
     deciding_sets_won INTEGER DEFAULT 0,
     deciding_sets_played INTEGER DEFAULT 0,
+
+    -- NEW: Additional fields to match your tennis data
+    elo_rank INTEGER,
+    player_name VARCHAR(200),
+    age DECIMAL(4,1),
+    elo_rating DECIMAL(6,1),
+    helo_rank INTEGER,
+    helo_rating DECIMAL(6,1),
+    celo_rank INTEGER,
+    celo_rating DECIMAL(6,1),
+    gelo_rank INTEGER,
+    gelo_rating DECIMAL(6,1),
+    peak_elo DECIMAL(6,1),
+    peak_month VARCHAR(20),
+    wta_rank INTEGER,
+    log_diff DECIMAL(4,2),
+
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (player_id) REFERENCES players(id),
     UNIQUE(player_id, stat_date, surface, timeframe)
@@ -103,57 +120,128 @@ class DatabaseInserter:
     def insert_player_stats(self, items: List[StructuredDataItem]):
         """
         Inserts player statistics from scraped data.
-        This implementation is now generic and works for any project that scrapes player stats.
+        FIXED: Now handles the actual data structure from your scraper.
         """
         cursor = self.conn.cursor()
         total_inserted = 0
         from datetime import date
 
+        logger.info(f"🔄 Processing {len(items)} structured data items...")
+
         for item in items:
-            # --- INTELLIGENT DATA FINDER ---
-            # Find the first field in the data that is a list of dictionaries (our structured list)
-            stats_list = []
+            logger.info(f"📋 Processing item from {item.source_url}")
+            logger.info(f"📋 Available structured data keys: {list(item.structured_data.keys())}")
+
+            # FIXED: Find the actual data structure
+            main_data_list = None
+
+            # Look for the scraped table data
             for key, value in item.structured_data.items():
-                if isinstance(value, list) and all(isinstance(i, dict) for i in value):
-                    stats_list = value
-                    logger.info(f"Found structured list to process under key: '{key}'")
+                logger.info(
+                    f"   Key '{key}': {type(value)} with {len(value) if isinstance(value, list) else 'N/A'} items")
+                if isinstance(value, list) and value:
+                    main_data_list = value
+                    logger.info(f"✅ Found data list under key '{key}' with {len(value)} records")
                     break
 
-            if not stats_list:
-                logger.warning(f"No structured list found in item from {item.source_url}. Skipping.")
+            if not main_data_list:
+                logger.warning(f"❌ No structured list found in item from {item.source_url}")
                 continue
 
-            for stats_row in stats_list:
+            # Process each row from the table
+            for i, row_data in enumerate(main_data_list):
                 try:
-                    # Use .get() to safely access keys that might be missing
-                    player_name = stats_row.get('player') or stats_row.get('player_name')
-                    if not player_name: continue
+                    if not isinstance(row_data, dict):
+                        logger.warning(f"⚠️ Row {i} is not a dictionary: {type(row_data)}")
+                        continue
+
+                    logger.info(f"📊 Processing row {i}: {list(row_data.keys())}")
+
+                    # FIXED: Extract player name from any available field
+                    player_name = None
+                    for name_field in ['player', 'player_name', 'elorank', 'name']:
+                        if name_field in row_data and row_data[name_field]:
+                            player_name = str(row_data[name_field]).strip()
+                            break
+
+                    # Try to get player name from the first non-empty field
+                    if not player_name:
+                        for key, value in row_data.items():
+                            if value and isinstance(value, str) and len(value) > 1:
+                                # Check if it looks like a name (contains letters)
+                                if any(c.isalpha() for c in value):
+                                    player_name = value.strip()
+                                    logger.info(f"🎯 Using '{key}' as player name: {player_name}")
+                                    break
+
+                    if not player_name:
+                        logger.warning(f"⚠️ No player name found in row {i}: {row_data}")
+                        continue
 
                     player_id = self.get_or_create_player(player_name)
 
-                    def clean_percent(val):
-                        if isinstance(val, str): return float(val.strip().replace('%', ''))
-                        return val
+                    # FIXED: Map the actual field names from your scraper
+                    def safe_convert_number(val, default=None):
+                        """Safely convert a value to a number."""
+                        if val is None or val == '':
+                            return default
+                        try:
+                            # Remove any non-numeric characters except decimal point and minus
+                            if isinstance(val, str):
+                                cleaned = ''.join(c for c in val if c.isdigit() or c in '.-')
+                                if cleaned and cleaned != '-':
+                                    return float(cleaned)
+                            return float(val)
+                        except (ValueError, TypeError):
+                            return default
 
-                    # Map data from the scrape to the DB columns
+                    # Create data mapping - using the field names from your table structure
                     data_to_insert = {
                         "player_id": player_id,
+                        "player_name": player_name,
                         "stat_date": date.today().isoformat(),
-                        "surface": "all",  # This could be parameterized in the future
-                        "timeframe": "last52weeks",  # This could also be parameterized
-                        "matches_played": stats_row.get('matches_played'),
-                        "first_serve_percentage": clean_percent(stats_row.get('first_serve_percentage')),
-                        "first_serve_points_won": clean_percent(stats_row.get('first_serve_points_won')),
-                        "second_serve_points_won": clean_percent(stats_row.get('second_serve_points_won')),
-                        "service_games_won": clean_percent(stats_row.get('service_games_won')),
-                        # Add other mappings here as you create rules for them
+                        "surface": "all",
+                        "timeframe": "current",
                     }
 
-                    # Filter out None values so they don't overwrite DB defaults
+                    # Map all the fields from your scraped data
+                    field_mapping = {
+                        'elorank': 'elo_rank',
+                        'age': 'age',
+                        'elo': 'elo_rating',
+                        'helorank': 'helo_rank',
+                        'helo': 'helo_rating',
+                        'celorank': 'celo_rank',
+                        'celo': 'celo_rating',
+                        'gelorank': 'gelo_rank',
+                        'gelo': 'gelo_rating',
+                        'peakelo': 'peak_elo',
+                        'peakmonth': 'peak_month',
+                        'wtarank': 'wta_rank',
+                        'logdiff': 'log_diff',
+                        # Add more mappings as needed
+                    }
+
+                    # Apply the field mappings
+                    for scraper_field, db_field in field_mapping.items():
+                        if scraper_field in row_data:
+                            value = row_data[scraper_field]
+                            if db_field in ['age', 'elo_rating', 'helo_rating', 'celo_rating', 'gelo_rating',
+                                            'peak_elo', 'log_diff']:
+                                data_to_insert[db_field] = safe_convert_number(value)
+                            elif db_field in ['elo_rank', 'helo_rank', 'celo_rank', 'gelo_rank', 'wta_rank']:
+                                data_to_insert[db_field] = safe_convert_number(value, 0)
+                            else:
+                                data_to_insert[db_field] = str(value) if value else None
+
+                    # Filter out None values
                     data_to_insert = {k: v for k, v in data_to_insert.items() if v is not None}
 
-                    if not data_to_insert: continue
+                    if len(data_to_insert) <= 4:  # Only basic fields
+                        logger.warning(f"⚠️ Not enough data for row {i}: {data_to_insert}")
+                        continue
 
+                    # Insert into database
                     columns = ', '.join(data_to_insert.keys())
                     placeholders = ', '.join('?' for _ in data_to_insert)
                     sql = f"INSERT OR REPLACE INTO player_statistics ({columns}) VALUES ({placeholders})"
@@ -161,13 +249,16 @@ class DatabaseInserter:
                     cursor.execute(sql, tuple(data_to_insert.values()))
                     total_inserted += 1
 
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Skipping row due to data conversion error: {e}. Data: {stats_row}")
+                    if total_inserted <= 5:  # Log first 5 for debugging
+                        logger.info(f"✅ Inserted row {total_inserted}: {player_name} with {len(data_to_insert)} fields")
+
                 except Exception as e:
-                    logger.error(f"Error inserting stats row: {e}. Data: {stats_row}")
+                    logger.error(f"❌ Error processing row {i}: {e}")
+                    logger.error(f"   Row data: {row_data}")
 
         self.conn.commit()
-        logger.info(f"Successfully inserted/updated {total_inserted} rows into player_statistics.")
+        logger.info(f"🎉 Successfully inserted/updated {total_inserted} rows into player_statistics.")
+        return total_inserted
 
     def close(self):
         if self.conn:

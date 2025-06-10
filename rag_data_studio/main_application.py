@@ -20,6 +20,7 @@ from .components.project_panel import ProjectManager, ProjectDialog
 from .components.browser import InteractiveBrowser
 from .components.rule_editor import VisualElementTargeter, RulesManager
 from .components.dialogs import TestResultsDialog
+from .components.data_viewer import DataViewerDialog  # NEW
 from .integration.backend_bridge import BackendWorker
 
 # Import backend and storage components
@@ -105,6 +106,9 @@ def load_dark_theme():
     QScrollBar::handle:vertical { background: #505050; min-height: 20px; border-radius: 5px; }
     QScrollBar:horizontal { border: none; background: #2a2a2a; height: 10px; }
     QScrollBar::handle:horizontal { background: #505050; min-width: 20px; border-radius: 5px; }
+    QTabWidget::pane { border: 1px solid #404040; }
+    QTabBar::tab { background: #404040; padding: 8px 16px; margin-right: 2px; }
+    QTabBar::tab:selected { background: #4CAF50; }
     """
 
 
@@ -169,10 +173,11 @@ class RAGDataStudio(QMainWindow):
         super().__init__()
         self.current_project: Optional[ProjectConfig] = None
         self.backend_thread: Optional[QThread] = None
-        self.test_thread: Optional[QThread] = None  # Separate thread for testing
+        self.test_thread: Optional[QThread] = None
         self.scrape_worker: Optional[ScrapeRunner] = None
         self.progress_dialog: Optional[QProgressDialog] = None
         self.logger = setup_logger()
+        self.last_db_path: Optional[str] = None  # NEW: Track last database path
         self.init_ui()
         self.connect_signals()
         self.dark_mode_css_id = "scrape-studio-dark-mode"
@@ -244,18 +249,31 @@ class RAGDataStudio(QMainWindow):
         self.scrape_from_browser_checkbox = QCheckBox("Scrape from current browser view")
         self.scrape_from_browser_checkbox.setToolTip("If checked, uses HTML currently visible in browser")
 
-        buttons_layout = QHBoxLayout()
+        # NEW: Two rows of buttons
+        top_buttons_layout = QHBoxLayout()
         self.test_all_btn = QPushButton("🧪 Test All Rules")
         self.export_config_btn = QPushButton("💾 Export to YAML")
         self.run_scrape_btn = QPushButton("🚀 Run Full Scrape")
         self.run_scrape_btn.setProperty("class", "success")
 
-        buttons_layout.addWidget(self.test_all_btn)
-        buttons_layout.addWidget(self.export_config_btn)
-        buttons_layout.addWidget(self.run_scrape_btn)
+        top_buttons_layout.addWidget(self.test_all_btn)
+        top_buttons_layout.addWidget(self.export_config_btn)
+        top_buttons_layout.addWidget(self.run_scrape_btn)
+
+        # NEW: Bottom row with View Results button
+        bottom_buttons_layout = QHBoxLayout()
+        self.view_results_btn = QPushButton("👁️ View Results")
+        self.view_results_btn.setEnabled(False)  # Disabled until we have results
+        self.view_results_btn.setStyleSheet(
+            "QPushButton { background-color: #9C27B0; } QPushButton:hover { background-color: #AB47BC; }")
+
+        bottom_buttons_layout.addStretch()
+        bottom_buttons_layout.addWidget(self.view_results_btn)
+        bottom_buttons_layout.addStretch()
 
         global_actions_layout.addWidget(self.scrape_from_browser_checkbox)
-        global_actions_layout.addLayout(buttons_layout)
+        global_actions_layout.addLayout(top_buttons_layout)
+        global_actions_layout.addLayout(bottom_buttons_layout)
 
         right_layout.addWidget(right_splitter)
         right_layout.addWidget(global_actions_group)
@@ -294,6 +312,7 @@ class RAGDataStudio(QMainWindow):
         self.test_all_btn.clicked.connect(self.test_all_rules)
         self.export_config_btn.clicked.connect(self.export_project_config)
         self.run_scrape_btn.clicked.connect(self.run_full_scrape)
+        self.view_results_btn.clicked.connect(self.view_results)  # NEW
 
     def apply_dark_mode_on_load(self, ok):
         if ok and self.dark_mode_checkbox.isChecked():
@@ -343,6 +362,27 @@ class RAGDataStudio(QMainWindow):
         if project.target_websites:
             self.url_input.setText(project.target_websites[0])
         self.status_bar.showMessage(f"Loaded project: {project.name}")
+
+        # Check if results exist for this project
+        self._check_for_existing_results()
+
+    def _check_for_existing_results(self):
+        """Check if database results exist for the current project."""
+        if not self.current_project:
+            self.view_results_btn.setEnabled(False)
+            return
+
+        base_output_dir = self.current_project.output_directory or "./data_exports"
+        sanitized_project_name = self.current_project.name.lower().replace(' ', '_')
+        db_path = Path(base_output_dir) / f"{sanitized_project_name}.db"
+
+        if db_path.exists():
+            self.last_db_path = str(db_path)
+            self.view_results_btn.setEnabled(True)
+            self.view_results_btn.setText(f"👁️ View Results ({db_path.name})")
+        else:
+            self.view_results_btn.setEnabled(False)
+            self.view_results_btn.setText("👁️ View Results")
 
     def save_current_project(self):
         if self.current_project:
@@ -434,7 +474,6 @@ class RAGDataStudio(QMainWindow):
         url = self.browser.url().toString()
         rules = [r.to_dict() for r in self.current_project.scraping_rules]
 
-        # FIXED: Use separate thread for testing to avoid conflicts with scraping thread
         self._cleanup_test_thread()
 
         self.test_thread = QThread()
@@ -460,7 +499,7 @@ class RAGDataStudio(QMainWindow):
         if self.test_thread:
             if self.test_thread.isRunning():
                 self.test_thread.quit()
-                self.test_thread.wait(3000)  # Wait up to 3 seconds
+                self.test_thread.wait(3000)
             self.test_thread.deleteLater()
             self.test_thread = None
 
@@ -477,13 +516,11 @@ class RAGDataStudio(QMainWindow):
             return (self.backend_thread is not None and
                     self.backend_thread.isRunning())
         except RuntimeError:
-            # Thread object was deleted, clean up the reference
             self.backend_thread = None
             return False
 
     def run_full_scrape(self):
         """Execute the full scraping pipeline."""
-        # FIXED: Safe thread checking
         if self._is_scrape_running():
             QMessageBox.warning(self, "Scrape in Progress", "A scrape is already running. Please wait.")
             return
@@ -496,30 +533,25 @@ class RAGDataStudio(QMainWindow):
             QMessageBox.warning(self, "No Rules", "Please define some scraping rules first.")
             return
 
-        # Clean up any previous scrape resources
         self._cleanup_scrape_resources()
 
-        # Validate and export config
         self.temp_config_path_for_scrape = self.export_project_config(save_to_temp=True)
         if not self.temp_config_path_for_scrape:
             QMessageBox.critical(self, "Config Error", "Failed to generate scraping configuration.")
             return
 
-        # Create progress dialog
         self.progress_dialog = QProgressDialog("Initializing scrape...", "Cancel", 0, 100, self)
         self.progress_dialog.setWindowTitle("Scraping in Progress")
         self.progress_dialog.setWindowModality(Qt.WindowModal)
         self.progress_dialog.setMinimumDuration(0)
         self.progress_dialog.canceled.connect(self._cancel_scrape)
 
-        # Disable the scrape button
         self.run_scrape_btn.setEnabled(False)
         self.run_scrape_btn.setText("⏳ Scraping...")
 
         self.progress_dialog.show()
-        QApplication.processEvents()  # Ensure dialog shows immediately
+        QApplication.processEvents()
 
-        # Get HTML content if browser mode is selected
         if self.scrape_from_browser_checkbox.isChecked():
             print("🌐 Getting HTML from browser...")
             self.browser.page().toHtml(self._initiate_scrape_with_html)
@@ -535,17 +567,14 @@ class RAGDataStudio(QMainWindow):
 
         print(f"🚀 Initiating scrape with config: {self.temp_config_path_for_scrape}")
 
-        # Create and setup worker thread
         self.backend_thread = QThread()
         self.scrape_worker = ScrapeRunner(self.temp_config_path_for_scrape, html_content)
         self.scrape_worker.moveToThread(self.backend_thread)
 
-        # Connect signals
         self.scrape_worker.progress.connect(self._update_progress)
         self.scrape_worker.finished.connect(self._on_scrape_finished)
         self.scrape_worker.error.connect(self.on_backend_error)
 
-        # Connect thread lifecycle - FIXED: Proper cleanup
         self.backend_thread.started.connect(self.scrape_worker.run)
         self.backend_thread.finished.connect(self._on_thread_finished)
 
@@ -571,7 +600,6 @@ class RAGDataStudio(QMainWindow):
         """Handle successful scrape completion."""
         print(f"✅ Scrape finished with status: {status}")
 
-        # Get results from worker
         if self.scrape_worker and status == "success":
             results = self.scrape_worker.results
             metrics = self.scrape_worker.metrics
@@ -582,7 +610,6 @@ class RAGDataStudio(QMainWindow):
                 self._cleanup_scrape_resources()
                 return
 
-            # Save to database
             try:
                 base_output_dir = self.current_project.output_directory or "./data_exports"
                 Path(base_output_dir).mkdir(parents=True, exist_ok=True)
@@ -595,7 +622,11 @@ class RAGDataStudio(QMainWindow):
                 inserter.insert_player_stats(results)
                 inserter.close()
 
-                # Show success message
+                # Store the database path for viewing results
+                self.last_db_path = str(db_path)
+                self.view_results_btn.setEnabled(True)
+                self.view_results_btn.setText(f"👁️ View Results ({db_path.name})")
+
                 success_msg = f"""✅ Scraping Complete!
 
 📊 Results:
@@ -606,7 +637,9 @@ class RAGDataStudio(QMainWindow):
 💾 Data saved to:
 {db_path}
 
-🎯 Ready for RAG ingestion!"""
+🎯 Ready for RAG ingestion!
+
+Click "View Results" to see your data!"""
 
                 self._cleanup_scrape_resources()
                 QMessageBox.information(self, "Scrape Complete", success_msg)
@@ -622,23 +655,18 @@ class RAGDataStudio(QMainWindow):
     def _on_thread_finished(self):
         """Handle thread finished signal."""
         print("🔧 Backend thread finished")
-        # Don't clean up here - let the other handlers do it
-        # This prevents the "already deleted" error
 
     def _cleanup_scrape_resources(self):
         """Clean up all scraping-related resources."""
         print("🧹 Cleaning up scrape resources...")
 
-        # Close progress dialog
         if self.progress_dialog:
             self.progress_dialog.close()
             self.progress_dialog = None
 
-        # Reset UI
         self.run_scrape_btn.setEnabled(True)
         self.run_scrape_btn.setText("🚀 Run Full Scrape")
 
-        # Clean up temp files
         if self.temp_config_path_for_scrape and os.path.exists(self.temp_config_path_for_scrape):
             try:
                 os.unlink(self.temp_config_path_for_scrape)
@@ -646,7 +674,6 @@ class RAGDataStudio(QMainWindow):
                 pass
             self.temp_config_path_for_scrape = None
 
-        # Clean up thread and worker - FIXED: Safe cleanup
         if self.scrape_worker:
             self.scrape_worker.deleteLater()
             self.scrape_worker = None
@@ -655,22 +682,31 @@ class RAGDataStudio(QMainWindow):
             try:
                 if self.backend_thread.isRunning():
                     self.backend_thread.quit()
-                    self.backend_thread.wait(3000)  # Wait up to 3 seconds
+                    self.backend_thread.wait(3000)
                 self.backend_thread.deleteLater()
             except RuntimeError:
-                # Thread already deleted, just clear the reference
                 pass
             self.backend_thread = None
+
+    def view_results(self):
+        """Open the data viewer dialog."""
+        if not self.last_db_path or not Path(self.last_db_path).exists():
+            QMessageBox.warning(self, "No Results", "No database results found. Run a scrape first!")
+            return
+
+        try:
+            dialog = DataViewerDialog(self.last_db_path, self)
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "Viewer Error", f"Failed to open data viewer:\n{e}")
 
     def closeEvent(self, event):
         """Handle application close event."""
         print("🔒 Application closing, cleaning up resources...")
 
-        # Clean up all threads
         self._cleanup_scrape_resources()
         self._cleanup_test_thread()
 
-        # Accept the close event
         event.accept()
 
     def export_project_config(self, save_to_temp=False) -> Optional[str]:
@@ -720,7 +756,6 @@ class RAGDataStudio(QMainWindow):
         base_output_dir = project.output_directory or f"./data_exports/{project.domain}"
         output_path = Path(base_output_dir) / f"{source_name}.jsonl"
 
-        # Ensure we have valid target websites
         target_urls = project.target_websites if project.target_websites else ["https://example.com"]
 
         return {
