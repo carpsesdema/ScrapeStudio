@@ -47,7 +47,7 @@ class InteractiveBrowser(QWebEngineView):
                         while ((sib = sib.previousElementSibling)) {{
                             if (sib.nodeName.toLowerCase() === el.nodeName.toLowerCase()) nth++;
                         }}
-                        if (nth != 1) selector += `:nth-of-type(${'{nth}'})`;
+                        if (nth != 1) selector += `:nth-of-type(${{nth}})`;
                     }}
                     path.unshift(selector);
                     el = el.parentNode;
@@ -85,8 +85,30 @@ class InteractiveBrowser(QWebEngineView):
                         tag: 'table'
                     }};
                     const thead = table.querySelector('thead');
-                    // Find headers in thead, or fallback to the first row of the table
-                    const header_cells = table.querySelectorAll('thead th, tr:first-child th');
+
+                    // =========================================================
+                    // ✨ UPGRADED HEADER DETECTION LOGIC!
+                    let header_cells = [];
+                    // Strategy 1: Find any `<th>` or `<td>` inside a `<thead>`
+                    if (thead) {{
+                        header_cells = thead.querySelectorAll('th, td');
+                    }}
+                    // Strategy 2: If no thead, look for `<th>` elements in the table's first row
+                    if (header_cells.length === 0) {{
+                        const firstRow = table.querySelector('tr');
+                        if (firstRow) {{
+                            header_cells = firstRow.querySelectorAll('th');
+                        }}
+                    }}
+                    // Strategy 3: If still no headers, assume the first row contains header text in `<td>` or `<th>`
+                    if (header_cells.length === 0) {{
+                        const firstRow = table.querySelector('tr');
+                        if (firstRow) {{
+                            header_cells = firstRow.querySelectorAll('th, td');
+                        }}
+                    }}
+                    // =========================================================
+
                     selectionContext.table.headers = Array.from(header_cells).map(th => th.textContent.trim());
 
                     if(row) {{

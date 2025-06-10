@@ -405,9 +405,18 @@ class RAGDataStudio(QMainWindow):
         self.save_current_project()
 
     def add_batch_rules_to_project(self, rules: List[ScrapingRule]):
+        """Handles adding batch rules, now with clearing logic for auto-detection."""
         if not self.current_project:
             return
-        self.current_project.scraping_rules.extend(rules)
+
+        # An empty list signals that we should clear the rules (from the auto-detector)
+        if not rules:
+            self.current_project.scraping_rules.clear()
+        else:
+            # For a new batch, we always start fresh
+            self.current_project.scraping_rules.clear()
+            self.current_project.scraping_rules.extend(rules)
+
         self.rules_manager.set_rules(self.current_project.scraping_rules)
         self.save_current_project()
 
@@ -564,6 +573,19 @@ class RAGDataStudio(QMainWindow):
         if not self.temp_config_path_for_scrape:
             self._cleanup_scrape_resources()
             return
+
+        ############################################################################
+        # DEBUG CHECKPOINT 1: Is the HTML content being passed correctly?
+        print("\n" + "#" * 50)
+        print("DEBUG: CHECKPOINT 1 (main_application.py)")
+        if html_content:
+            print(f"HTML content received. Length: {len(html_content)}")
+            print("First 500 chars of HTML:")
+            print(html_content[:500])
+        else:
+            print("No HTML content provided (running URL-based scrape).")
+        print("#" * 50 + "\n")
+        ############################################################################
 
         print(f"🚀 Initiating scrape with config: {self.temp_config_path_for_scrape}")
 

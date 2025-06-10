@@ -97,22 +97,21 @@ class VisualElementTargeter(QWidget):
                 self.field_name_input.setText(suggested_name[:40])
 
     def handle_table_detection(self, context: dict):
-        """Automatically creates a full set of rules for a detected table."""
+        """Automatically creates a full set of rules for a detected table without confirmation."""
         table_info = context.get('table', {})
         headers = table_info.get('headers', [])
         all_rows_selector = table_info.get('all_rows_selector')
 
         if not headers or not all_rows_selector:
-            QMessageBox.warning(self, "Table Incomplete",
-                                "Detected a table, but couldn't find headers or row selectors. Please define rules manually.")
+            try:
+                # Use a status bar message instead of a disruptive pop-up
+                self.window().status_bar.showMessage("Detected a table, but couldn't find headers.", 4000)
+            except Exception:
+                pass  # Fails silently if status bar isn't available
             return
 
-        reply = QMessageBox.question(self, "Table Detected!",
-                                     f"I found a table with {len(headers)} columns. Should I create rules for all of them automatically?",
-                                     QMessageBox.Yes | QMessageBox.No)
-
-        if reply == QMessageBox.No:
-            return
+        # ✨ NEW: Signal to clear existing rules before adding the new ones for a clean slate.
+        self.batch_rules_created.emit([])
 
         main_rule_name = "scraped_table_data"
         main_rule = ScrapingRule(
@@ -124,10 +123,14 @@ class VisualElementTargeter(QWidget):
         )
 
         for i, header_text in enumerate(headers):
-            field_name = re.sub(r'[^a-zA-Z0-9_]', '', header_text.lower().replace(" ", "_")) or f"column_{i + 1}"
+            # ✨ NEW: Improved field name generation
+            field_name = header_text.lower().replace(" ", "_").replace("-", "_")
+            field_name = re.sub(r'[^a-zA-Z0-9_]', '', field_name) or f"column_{i + 1}"
+
             sub_rule = ScrapingRule(
                 id=f"rule_{uuid.uuid4().hex[:8]}",
                 name=field_name,
+                # This selector is more robust for tables with or without <thead>
                 selector=f"td:nth-of-type({i + 1}), th:nth-of-type({i + 1})",
                 extraction_type="text"
             )

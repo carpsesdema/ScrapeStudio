@@ -6,6 +6,7 @@ import sqlite3
 import logging
 from typing import List, Dict, Any
 from pathlib import Path
+from datetime import date
 
 # Use the structured data model from the scraper
 from scraper.rag_models import StructuredDataItem
@@ -13,7 +14,6 @@ from scraper.rag_models import StructuredDataItem
 logger = logging.getLogger(__name__)
 
 DB_SCHEMA = """
--- The full DB schema from before, omitted for brevity
 CREATE TABLE IF NOT EXISTS players (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     api_player_id VARCHAR(50) UNIQUE,
@@ -62,8 +62,6 @@ CREATE TABLE IF NOT EXISTS player_statistics (
     tiebreaks_played INTEGER DEFAULT 0,
     deciding_sets_won INTEGER DEFAULT 0,
     deciding_sets_played INTEGER DEFAULT 0,
-
-    -- NEW: Additional fields to match your tennis data
     elo_rank INTEGER,
     player_name VARCHAR(200),
     age DECIMAL(4,1),
@@ -78,10 +76,9 @@ CREATE TABLE IF NOT EXISTS player_statistics (
     peak_month VARCHAR(20),
     wta_rank INTEGER,
     log_diff DECIMAL(4,2),
-
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (player_id) REFERENCES players(id),
-    UNIQUE(player_id, stat_date, surface, timeframe)
+    UNIQUE(player_id, stat_date)
 );
 """
 
@@ -95,7 +92,6 @@ class DatabaseInserter:
         self._create_tables()
 
     def _create_tables(self):
-        """Creates database tables if they don't exist."""
         try:
             with self.conn:
                 self.conn.executescript(DB_SCHEMA)
@@ -105,159 +101,100 @@ class DatabaseInserter:
             raise
 
     def get_or_create_player(self, player_name: str) -> int:
-        """Finds a player by name or creates a new entry, returning the player's ID."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT id FROM players WHERE name = ?", (player_name,))
         result = cursor.fetchone()
         if result:
             return result[0]
         else:
-            logger.info(f"Creating new player: {player_name}")
             cursor.execute("INSERT INTO players (name) VALUES (?)", (player_name,))
             self.conn.commit()
             return cursor.lastrowid
 
     def insert_player_stats(self, items: List[StructuredDataItem]):
-        """
-        Inserts player statistics from scraped data.
-        FIXED: Now handles the actual data structure from your scraper.
-        """
         cursor = self.conn.cursor()
         total_inserted = 0
-        from datetime import date
-
-        logger.info(f"🔄 Processing {len(items)} structured data items...")
 
         for item in items:
-            logger.info(f"📋 Processing item from {item.source_url}")
-            logger.info(f"📋 Available structured data keys: {list(item.structured_data.keys())}")
-
-            # FIXED: Find the actual data structure
             main_data_list = None
-
-            # Look for the scraped table data
             for key, value in item.structured_data.items():
-                logger.info(
-                    f"   Key '{key}': {type(value)} with {len(value) if isinstance(value, list) else 'N/A'} items")
-                if isinstance(value, list) and value:
+                if isinstance(value, list) and value and isinstance(value[0], dict):
                     main_data_list = value
-                    logger.info(f"✅ Found data list under key '{key}' with {len(value)} records")
                     break
 
             if not main_data_list:
-                logger.warning(f"❌ No structured list found in item from {item.source_url}")
+                logger.warning(f"No structured list found in item from {item.source_url}. Skipping.")
                 continue
 
-            # Process each row from the table
-            for i, row_data in enumerate(main_data_list):
+            for row_data in main_data_list:
                 try:
-                    if not isinstance(row_data, dict):
-                        logger.warning(f"⚠️ Row {i} is not a dictionary: {type(row_data)}")
+                    player_name_raw = row_data.get('player')
+                    if not player_name_raw or not isinstance(player_name_raw, str):
                         continue
 
-                    logger.info(f"📊 Processing row {i}: {list(row_data.keys())}")
-
-                    # FIXED: Extract player name from any available field
-                    player_name = None
-                    for name_field in ['player', 'player_name', 'elorank', 'name']:
-                        if name_field in row_data and row_data[name_field]:
-                            player_name = str(row_data[name_field]).strip()
-                            break
-
-                    # Try to get player name from the first non-empty field
+                    player_name = player_name_raw.strip()
                     if not player_name:
-                        for key, value in row_data.items():
-                            if value and isinstance(value, str) and len(value) > 1:
-                                # Check if it looks like a name (contains letters)
-                                if any(c.isalpha() for c in value):
-                                    player_name = value.strip()
-                                    logger.info(f"🎯 Using '{key}' as player name: {player_name}")
-                                    break
-
-                    if not player_name:
-                        logger.warning(f"⚠️ No player name found in row {i}: {row_data}")
                         continue
 
                     player_id = self.get_or_create_player(player_name)
 
-                    # FIXED: Map the actual field names from your scraper
+                    field_mapping = {
+                        'elorank': 'elo_rank', 'player': 'player_name', 'age': 'age',
+                        'elo': 'elo_rating', 'helorank': 'helo_rank', 'helo': 'helo_rating',
+                        'celorank': 'celo_rank', 'celo': 'celo_rating', 'gelorank': 'gelo_rank',
+                        'gelo': 'gelo_rating', 'peakelo': 'peak_elo', 'peakmonth': 'peak_month',
+                        'wtarank': 'wta_rank', 'logdiff': 'log_diff',
+                    }
+
                     def safe_convert_number(val, default=None):
-                        """Safely convert a value to a number."""
                         if val is None or val == '':
                             return default
                         try:
-                            # Remove any non-numeric characters except decimal point and minus
                             if isinstance(val, str):
                                 cleaned = ''.join(c for c in val if c.isdigit() or c in '.-')
-                                if cleaned and cleaned != '-':
-                                    return float(cleaned)
+                                if cleaned in ('', '.', '-'):
+                                    return default
+                                return float(cleaned)
                             return float(val)
                         except (ValueError, TypeError):
                             return default
 
-                    # Create data mapping - using the field names from your table structure
                     data_to_insert = {
                         "player_id": player_id,
-                        "player_name": player_name,
-                        "stat_date": date.today().isoformat(),
-                        "surface": "all",
-                        "timeframe": "current",
+                        "stat_date": date.today().isoformat()
                     }
 
-                    # Map all the fields from your scraped data
-                    field_mapping = {
-                        'elorank': 'elo_rank',
-                        'age': 'age',
-                        'elo': 'elo_rating',
-                        'helorank': 'helo_rank',
-                        'helo': 'helo_rating',
-                        'celorank': 'celo_rank',
-                        'celo': 'celo_rating',
-                        'gelorank': 'gelo_rank',
-                        'gelo': 'gelo_rating',
-                        'peakelo': 'peak_elo',
-                        'peakmonth': 'peak_month',
-                        'wtarank': 'wta_rank',
-                        'logdiff': 'log_diff',
-                        # Add more mappings as needed
-                    }
+                    for scraped_field, db_column in field_mapping.items():
+                        if scraped_field in row_data and row_data[scraped_field] is not None:
+                            value = row_data[scraped_field]
+                            # Use a clearer type-based conversion
+                            if 'rank' in db_column:
+                                data_to_insert[db_column] = int(safe_convert_number(value, 0))
+                            elif any(x in db_column for x in ['rating', 'elo', 'age', 'diff']):
+                                data_to_insert[db_column] = safe_convert_number(value)
+                            else:  # For strings like player_name and peak_month
+                                data_to_insert[db_column] = str(value).strip()
 
-                    # Apply the field mappings
-                    for scraper_field, db_field in field_mapping.items():
-                        if scraper_field in row_data:
-                            value = row_data[scraper_field]
-                            if db_field in ['age', 'elo_rating', 'helo_rating', 'celo_rating', 'gelo_rating',
-                                            'peak_elo', 'log_diff']:
-                                data_to_insert[db_field] = safe_convert_number(value)
-                            elif db_field in ['elo_rank', 'helo_rank', 'celo_rank', 'gelo_rank', 'wta_rank']:
-                                data_to_insert[db_field] = safe_convert_number(value, 0)
-                            else:
-                                data_to_insert[db_field] = str(value) if value else None
+                    # Filter out any keys that didn't get a value
+                    final_data = {k: v for k, v in data_to_insert.items() if v is not None}
 
-                    # Filter out None values
-                    data_to_insert = {k: v for k, v in data_to_insert.items() if v is not None}
-
-                    if len(data_to_insert) <= 4:  # Only basic fields
-                        logger.warning(f"⚠️ Not enough data for row {i}: {data_to_insert}")
+                    if len(final_data) <= 2:  # player_id and stat_date
+                        logger.warning(f"Not enough valid data to insert for player {player_name}")
                         continue
 
-                    # Insert into database
-                    columns = ', '.join(data_to_insert.keys())
-                    placeholders = ', '.join('?' for _ in data_to_insert)
+                    columns = ', '.join(final_data.keys())
+                    placeholders = ', '.join('?' for _ in final_data)
                     sql = f"INSERT OR REPLACE INTO player_statistics ({columns}) VALUES ({placeholders})"
 
-                    cursor.execute(sql, tuple(data_to_insert.values()))
+                    cursor.execute(sql, tuple(final_data.values()))
                     total_inserted += 1
 
-                    if total_inserted <= 5:  # Log first 5 for debugging
-                        logger.info(f"✅ Inserted row {total_inserted}: {player_name} with {len(data_to_insert)} fields")
-
                 except Exception as e:
-                    logger.error(f"❌ Error processing row {i}: {e}")
-                    logger.error(f"   Row data: {row_data}")
+                    logger.error(f"FATAL DB ERROR on row for '{row_data.get('player', 'UNKNOWN')}': {e}", exc_info=True)
+                    logger.error(f"Problematic row data: {row_data}")
 
         self.conn.commit()
-        logger.info(f"🎉 Successfully inserted/updated {total_inserted} rows into player_statistics.")
+        logger.info(f"DB INSERT COMPLETE: {total_inserted} rows successfully inserted/updated.")
         return total_inserted
 
     def close(self):

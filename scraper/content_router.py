@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup, Tag
 import trafilatura
 import uuid
 from typing import Optional, List, Dict, Any, Union
+import json
 
 from .config_manager import SourceConfig, CustomFieldConfig
 from .rag_models import FetchedItem, ParsedItem, ExtractedLinkInfo
@@ -59,7 +60,6 @@ class ContentRouter:
                 logger.info(f"   Container selector: {field_config.selector}")
                 logger.info(f"   Sub-selectors: {len(field_config.sub_selectors)}")
 
-                # Find container elements (e.g., table rows)
                 container_elements = soup.select(field_config.selector)
                 logger.info(f"   Found {len(container_elements)} container elements")
 
@@ -69,24 +69,13 @@ class ContentRouter:
                     continue
 
                 structured_list = []
-
-                # Process each container (each table row)
                 for i, container in enumerate(container_elements):
                     item_data = {}
-
-                    # Extract data using sub-selectors within this container
                     for sub_field_config in field_config.sub_selectors:
                         sub_field_name = sub_field_config.name
                         sub_value = self._extract_single_field(container, sub_field_config)
-
-                        # Always include the field, even if None
                         item_data[sub_field_name] = sub_value
 
-                        # Debug first few rows
-                        if i < 3:
-                            logger.info(f"     Row {i + 1} - {sub_field_name}: '{sub_value}'")
-
-                    # Only add if we got at least some data
                     non_empty_fields = sum(1 for v in item_data.values() if v is not None and v != "")
                     if non_empty_fields > 0:
                         structured_list.append(item_data)
@@ -94,16 +83,24 @@ class ContentRouter:
                         logger.warning(f"   Row {i + 1} has no data, skipping")
 
                 custom_data[field_name] = structured_list
-                logger.info(f"✅ Structured list '{field_name}' created with {len(structured_list)} items")
 
-                # Log sample data structure
+                ############################################################################
+                # DEBUG CHECKPOINT 2: What data did the scraper actually extract?
+                print("\n" + "#" * 50)
+                print("DEBUG: CHECKPOINT 2 (content_router.py)")
+                print(f"Extraction for '{field_name}' complete.")
+                print(f"Found {len(structured_list)} items.")
                 if structured_list:
-                    sample_item = structured_list[0]
-                    logger.info(f"   Sample item keys: {list(sample_item.keys())}")
-                    logger.info(f"   Sample item: {sample_item}")
+                    print("First 3 items extracted by scraper:")
+                    # Pretty print the first few items
+                    for item in structured_list[:3]:
+                        print(json.dumps(item, indent=2))
+                else:
+                    print("Structured list is EMPTY.")
+                print("#" * 50 + "\n")
+                ############################################################################
 
             else:
-                # Handle regular fields
                 value = self._extract_single_field(soup, field_config)
                 custom_data[field_name] = value
                 logger.info(f"✅ Field '{field_name}': {type(value)} = {str(value)[:100] if value else 'None'}")
@@ -121,7 +118,6 @@ class ContentRouter:
         soup = BeautifulSoup(item.content, 'lxml')
         logger.info(f"📄 Parsed HTML content ({len(item.content)} chars)")
 
-        # Extract title
         title = item.title
         if not title:
             title_selector = config.selectors.title or 'title'
@@ -129,7 +125,6 @@ class ContentRouter:
             if title_tag:
                 title = title_tag.get_text(strip=True)
 
-        # Extract main text content (optional)
         main_text = None
         if config.selectors.main_content:
             content_tag = soup.select_one(config.selectors.main_content)
@@ -138,21 +133,10 @@ class ContentRouter:
         if not main_text:
             main_text = trafilatura.extract(item.content, include_comments=False, include_tables=True)
 
-        # Extract custom structured data
         logger.info("🔧 Starting custom field extraction...")
         custom_fields = self._extract_custom_fields(soup, config)
         logger.info(f"✅ Custom field extraction complete. Fields: {list(custom_fields.keys())}")
 
-        # Validate that we got structured data
-        for field_name, field_value in custom_fields.items():
-            if isinstance(field_value, list) and field_value:
-                first_item = field_value[0]
-                logger.info(f"📊 Field '{field_name}': {len(field_value)} items, first item type: {type(first_item)}")
-                if isinstance(first_item, dict):
-                    logger.info(f"   First item keys: {list(first_item.keys())}")
-                    logger.info(f"   First item preview: {dict(list(first_item.items())[:3])}")
-
-        # Extract links if needed
         links = extract_relevant_links(soup, str(item.source_url))
 
         parsed_item = ParsedItem(
